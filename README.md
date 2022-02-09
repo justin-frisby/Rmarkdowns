@@ -1,1 +1,3 @@
 # Rmarkdowns
+
+In this repo I included one of my data science assignments where we were tasked with re-creating an analysis for a publication using public data. Once we recreated the analysis, we then had to see if we could create a "better" model and compare the results. For all of my data science classes, we have been required to submit our work via .html files generated through .Rmd files so I feel very comfortable working with R markdown. Looking back at this assignment, I definitely could have documented a bit more and added some more headline sections to pivot through. In a professional setting I would for sure take those additional steps to improve the readability and useability. 
