@@ -1,0 +1,416 @@
+---
+title: Homework Assignment 5
+author: Justin Frisby
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: true
+    number_sections: true
+    toc_depth: 6
+    toc_float:
+      collapsed: TRUE
+      smooth_scroll: TRUE
+---
+
+<div style="margin-bottom:100px;">
+
+```{r setup}
+library(knitr)
+library(tidyverse)
+library(dplyr)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+$~$
+
+------------------------------------------------------------------------
+
+$~$
+
+# Read in the data
+```{r}
+Week_5_wd <-  file.path('/Users/justinfrisby/Desktop/dev/R/school/hds500/week5/')
+df_dm_data <- read.csv(paste(Week_5_wd,'diabetic_data.csv', sep = ""))
+df_mapping_data <- read.csv(paste(Week_5_wd,'IDs_mapping.csv', sep = ""))
+```
+
+
+The mapping file has multiple mapping tables inside of it, here I break the tables up by the empty rows and assign them to be their own mapping dataframes. 
+```{r}
+empty_rows <- rowSums(df_mapping_data == "")==ncol(df_mapping_data)
+indiv_mapping_dfs <- split(subset(df_mapping_data,!empty_rows),cumsum(empty_rows)[!empty_rows])
+
+df_admit_type <- indiv_mapping_dfs[[1]][-1,] %>%
+  rename( "AdmissionType" = "description")
+df_disch_disp <- indiv_mapping_dfs[[2]][-1,] %>%
+  rename("discharge_disposition_id" = "admission_type_id",
+         "DischargeDisposition" = "description")
+df_admit_sourc <- indiv_mapping_dfs[[3]][-1,] %>%
+  rename("admission_source_id" = "admission_type_id",
+         "AdmissionSource" = "description")
+
+df_admit_sourc$admission_source_id <- as.integer(df_admit_sourc$admission_source_id ) 
+df_admit_type$admission_type_id <- as.integer(df_admit_type$admission_type_id ) 
+df_disch_disp$discharge_disposition_id <- as.integer(df_disch_disp$discharge_disposition_id ) 
+
+```
+
+Join the lookup values from the mapping dataframes, filter out the death & hospice dispositions and select the first encounter for each patient with multiple encounters. I used min encounter id to select the first encounter. 
+```{r}
+df_joined <- df_dm_data %>%
+  left_join(df_admit_type) %>%
+  left_join(df_disch_disp) %>%
+  left_join(df_admit_sourc)
+  
+df_joined <- df_joined %>%
+  group_by(patient_nbr) %>%
+  slice(which.min(encounter_id)) %>%
+  filter(!DischargeDisposition %in% c("Hospice / medical facility","Expired","Expired at home. Medicaid only, hospice.","Expired in a medical facility. Medicaid only, hospice.","Hospice / home","Hospice / medical facility"))
+glimpse(df_joined)
+```
+
+Creating calculated fields and renaming levels:
+```{r}
+df_joined <- df_joined %>%
+  mutate(Discharge = if_else(DischargeDisposition == "Discharged to home", "Home", "Other"),
+         Race2 = case_when(race == "AfricanAmerican" ~ "African American",
+                           race == "Caucasian" ~ "Caucasian",
+                           race == "?" ~ "Missing",
+                           race %in% c("Hispanic","Asian","Other") ~ "Other"),
+         Admission = case_when(AdmissionSource == " Emergency Room" ~ "Emergency Room",
+                               AdmissionSource %in% c(" Physician Referral","HMO Referral") ~ "Referral",
+                               TRUE ~ "Other"),
+         medical_Specialty_2 = case_when(medical_specialty == "Cardiology" ~ "Cardiology",
+                               medical_specialty == "Family/GeneralPractice" ~ "General Practice",
+                               medical_specialty == "InternalMedicine" ~ "Internal Medicine",
+                               medical_specialty == "?" ~ "Missing",
+                               grepl("Surgery", medical_specialty) ~ "Surgery",
+                               TRUE ~ "Other"),
+         Age_2 = case_when(age %in% c("[0-10)","[20-30)") ~ "<30",
+                           age %in% c("[30-40)","[40-50)","[50-60)") ~ "[30,60)",
+                           TRUE ~ "[60,100)"),
+         Diagnosis1_code = as.integer(if_else(diag_1 == "?", "000",gsub("[.]","",str_extract(diag_1, "[0-9]+.?")))),
+         Diagnosis = case_when(
+                        ((Diagnosis1_code >= 390 & Diagnosis1_code <= 459) | Diagnosis1_code == 785) ~ "Circulatory",
+                        ((Diagnosis1_code >= 520 & Diagnosis1_code <= 579) | Diagnosis1_code == 787) ~ "Digestive",
+                        ((Diagnosis1_code >= 580 & Diagnosis1_code <= 629) | Diagnosis1_code == 788) ~ "Genitourinary",
+                        ((Diagnosis1_code >= 800 & Diagnosis1_code <= 998) | Diagnosis1_code == 999) ~ "Injury",
+                      ((Diagnosis1_code >= 710 & Diagnosis1_code <= 738) | Diagnosis1_code == 739) ~ "Musculoskeletal",
+                      ((Diagnosis1_code >= 140 & Diagnosis1_code <= 238) | Diagnosis1_code == 239) ~ "Neoplasms",
+                      ((Diagnosis1_code >= 460 & Diagnosis1_code <= 519) | Diagnosis1_code == 786) ~ "Respiratory",
+                      Diagnosis1_code == 250 ~ "Diabetes",
+                      TRUE ~ "Other"),
+         HbA1c = case_when(
+                        (A1Cresult == ">8" & change == "Ch") ~ "High, changed",
+                        (A1Cresult == ">8" & change == "No") ~ "High, not changed",
+                        (A1Cresult == ">7" | A1Cresult == "Norm") ~ "Normal",
+                      TRUE ~ "Not Measured"),
+         WasReadmitted = if_else(readmitted == "<30","Yes","No")
+)
+
+```
+
+Transform all variables to factors and setting factor reference based on reference levels in the paper:
+```{r}
+df_features <- df_joined %>%
+  select(patient_nbr, WasReadmitted, Discharge, Admission, Race2, medical_Specialty_2, Age_2, Diagnosis, HbA1c, time_in_hospital, gender)
+feature_cols <- c('WasReadmitted', 'Discharge', 'Admission', 'Race2', 'medical_Specialty_2','Age_2', 'Diagnosis', 'HbA1c', 'gender')
+df_features[,feature_cols] <- lapply(df_features[,feature_cols], as.factor)
+
+df_features$WasReadmitted <- relevel(df_features$WasReadmitted, ref = "No")
+df_features$Discharge <- relevel(df_features$Discharge, ref = "Home")
+df_features$Admission <- relevel(df_features$Admission, ref = "Emergency Room")
+df_features$Race2 <- relevel(df_features$Race2, ref = "African American")
+df_features$medical_Specialty_2 <- relevel(df_features$medical_Specialty_2, ref = "Cardiology")
+df_features$Age_2 <- relevel(df_features$Age_2, ref = "[30,60)")
+df_features$Diagnosis <- relevel(df_features$Diagnosis, ref = "Diabetes")
+df_features$HbA1c <- relevel(df_features$HbA1c, ref = "Not Measured")
+df_features$gender <- relevel(df_features$gender, ref = "Female")
+
+```
+
+Recreate Table 2 from the paper:
+The numbers here are slightly different but very close
+```{r}
+## Create Table 2
+
+table_2 <- df_features %>%
+  group_by(Diagnosis) %>%
+  summarise(Number_of_Encounters = n())%>%
+  mutate(Pct_of_encounters = (Number_of_Encounters / nrow(df_features))*100) %>%
+  arrange(desc(Pct_of_encounters)) 
+
+target_row = table_2 %>% filter(Diagnosis == "Other")
+
+table_2 <- table_2 %>% filter(Diagnosis != "Other")
+
+table_2_final <- rbind(table_2,target_row)
+
+```
+
+Recreate Table 3 from the paper:
+This includes the same variables except for the continuous age variable which was not provided. 
+```{r}
+## Create Table 3
+
+table_3 <- arsenal::tableby(WasReadmitted ~ HbA1c + gender + Discharge + Admission + 
+                                  medical_Specialty_2 +  Diagnosis + Race2 + Age_2 +
+                                   time_in_hospital
+                            , data = df_features)
+# Rename variables
+summary(table_3)
+```
+
+Split the filtered & cleaned data into test/train dataframes and train the logistic regression model with pairwise interactions to mimic the paper methods
+```{r}
+## Run GLM, binomial - Train
+set.seed(123)
+sample.patient_nbr <- sample(df_features$patient_nbr, 
+                      size = nrow(df_features)*.6, 
+                      replace = FALSE)
+length(sample.patient_nbr)/nrow(df_features)
+
+df_features.train <- df_features %>%
+  filter(patient_nbr %in% sample.patient_nbr)
+glimpse(df_features.train)
+
+
+logit_mod.train <- glm(WasReadmitted ~ Discharge + Admission + Race2 +
+                                  medical_Specialty_2 + Age_2 + Diagnosis + 
+                                  HbA1c + time_in_hospital + Age_2:medical_Specialty_2 +
+                                    Diagnosis:Discharge + Race2:Discharge + Discharge:time_in_hospital 
+                                + medical_Specialty_2:Discharge + time_in_hospital:medical_Specialty_2 +
+                                time_in_hospital:Diagnosis + HbA1c:Diagnosis
+                 , data = df_features.train, family = binomial)
+broom::tidy(logit_mod.train)
+
+logit_model_errors <- logit_mod.train %>%
+  broom::glance() %>%
+  mutate(Model = "LR Model") %>%
+  select (Model, AIC, BIC)
+
+logit_model_train_scored <- df_features.train
+
+logit_model_train_scored$probs <- predict(logit_mod.train,
+                                     logit_model_train_scored,
+                                     "response")
+```
+Test the GLM model on the test set
+```{r}
+## Run GLM, binomial - Test
+df_features.test <- df_features %>%
+  filter(!(patient_nbr %in% sample.patient_nbr))
+
+logit_test_score <- df_features.test %>%
+  mutate(model = "new_model")
+
+logit_test_score$probs <- predict(logit_mod.train,logit_test_score, "response")
+glimpse(logit_test_score)
+
+logit_mod.prob_sum <- logit_model_train_scored %>%
+  group_by(WasReadmitted) %>%
+  summarise(min_prob = min(probs),
+            mean_prob = mean(probs),
+            max_prob = max(probs))
+
+base_threshold_value <- (logit_mod.prob_sum %>% filter(WasReadmitted == "Yes"))$mean_prob
+
+logit_test_score <- logit_test_score %>%
+  mutate(pred = if_else(probs > base_threshold_value, "Yes", "No")) %>%
+  mutate(pred_factor = as.factor(pred)) %>%
+  mutate(pred_factor = fct_relevel(pred_factor, c('No','Yes') )) %>%
+  mutate(correct_guess = if_else(pred_factor == WasReadmitted,TRUE,FALSE))
+
+```
+
+Create confusion matrix with additional model performance for the logistic regression model
+```{r}
+## Plot LR Confusion Matrix
+library(caret)
+library(e1071)
+
+logit_cm <- confusionMatrix(logit_test_score$pred_factor, logit_test_score$WasReadmitted, positive = "Yes")
+
+draw_confusion_matrix <- function(cm, cm_title) {
+
+  layout(matrix(c(1,1,2)))
+  par(mar=c(2,2,2,2))
+  plot(c(100, 345), c(300, 450), type = "n", xlab="", ylab="", xaxt='n', yaxt='n')
+  title(cm_title, cex.main=2)
+
+  # create the matrix 
+  rect(150, 430, 240, 370, col='#3F97D0')
+  text(195, 435, 'Class1', cex=1.2)
+  rect(250, 430, 340, 370, col='#F7AD50')
+  text(295, 435, 'Class2', cex=1.2)
+  text(125, 370, 'Predicted', cex=1.3, srt=90, font=2)
+  text(245, 450, 'Actual', cex=1.3, font=2)
+  rect(150, 305, 240, 365, col='#F7AD50')
+  rect(250, 305, 340, 365, col='#3F97D0')
+  text(140, 400, 'Class1', cex=1.2, srt=90)
+  text(140, 335, 'Class2', cex=1.2, srt=90)
+
+  # add in the cm results 
+  res <- as.numeric(cm$table)
+  text(195, 400, res[1], cex=1.6, font=2, col='white')
+  text(195, 335, res[2], cex=1.6, font=2, col='white')
+  text(295, 400, res[3], cex=1.6, font=2, col='white')
+  text(295, 335, res[4], cex=1.6, font=2, col='white')
+
+  # add in the specifics 
+  plot(c(100, 0), c(100, 0), type = "n", xlab="", ylab="", main = "DETAILS", xaxt='n', yaxt='n')
+  text(10, 85, names(cm$byClass[1]), cex=1.2, font=2)
+  text(10, 70, round(as.numeric(cm$byClass[1]), 3), cex=1.2)
+  text(30, 85, names(cm$byClass[2]), cex=1.2, font=2)
+  text(30, 70, round(as.numeric(cm$byClass[2]), 3), cex=1.2)
+  text(50, 85, names(cm$byClass[5]), cex=1.2, font=2)
+  text(50, 70, round(as.numeric(cm$byClass[5]), 3), cex=1.2)
+  text(70, 85, names(cm$byClass[6]), cex=1.2, font=2)
+  text(70, 70, round(as.numeric(cm$byClass[6]), 3), cex=1.2)
+  text(90, 85, names(cm$byClass[7]), cex=1.2, font=2)
+  text(90, 70, round(as.numeric(cm$byClass[7]), 3), cex=1.2)
+
+  # add in the accuracy information 
+  text(30, 35, names(cm$overall[1]), cex=1.5, font=2)
+  text(30, 20, round(as.numeric(cm$overall[1]), 3), cex=1.4)
+  text(70, 35, names(cm$overall[2]), cex=1.5, font=2)
+  text(70, 20, round(as.numeric(cm$overall[2]), 3), cex=1.4)
+}  
+
+draw_confusion_matrix(logit_cm, "Logistic Regression Confusion Matrix")
+```
+
+Construct a Random forest model to serve as an alternative to logistic regression model (THIS IS JUST EXPLORATORY! I created a "better" model below)
+```{r}
+## Run alt model
+library("randomForest")
+
+wy = sum(df_features.train$WasReadmitted=="Yes")/length(df_features.train$WasReadmitted)
+wn = 1 - wy
+
+rf <- randomForest(WasReadmitted ~ Discharge + Race2 +Age_2 + Diagnosis + HbA1c + gender + medical_Specialty_2,
+                   data = df_features.train, classwt = c("Yes"=wy, "No"=wn))
+rf
+
+rf.test.scored <- df_features.test %>%
+  mutate(model="RF")
+
+rf.test.scored$pred <- predict(rf, rf.test.scored, "response")
+rf.test.scored <- rf.test.scored %>%
+  mutate(pred_factor = as.factor(pred)) %>%
+  mutate(pred_factor = fct_relevel(pred_factor, c('No','Yes') ))
+
+rf_cm <- confusionMatrix(rf.test.scored$pred_factor, logit_test_score$WasReadmitted, positive = "Yes")
+draw_confusion_matrix(rf_cm, "Random Forest Confusion Matrix")
+
+```
+
+This is a very interesting exercise to compare the differences between Rf and LR with a imbalanced outcome class. Superficially, the random forest model looks like a better model in terms of accuracy as it only predicts on class. By classifying all of the predictions as no, it is wrong on each actual readmission. Since there are only two classes, and the readmission class only makes up 8.9% of the outcomes, the RF model is too sensitive to the class imbalance and does not make predictions of readmission = "Yes". The logistic regression model here would serve as the better model as it is not as sensitive to the class imbalance of the outcome variable. 
+
+I lead to believe that they did not split the data into test and train sets. When I run the LR model using a test train split, I get different estimates and p-values compared to running the LR model on the entire dataset. This is expected since the training sample is just that, a sample of the entire dataset. When running the LR model on the entire dataset, I get estimates that are much closer to the published values. I wonder if the difference is the differences in the training sample that we trained vs what they used, or if they fit the model on the entire dataset. Below are the estimates if I used the entire dataset instead of splitting into test/train which are much closer to what was reported in the manuscript. 
+
+```{r}
+logit_mod.wholeDf <- glm(WasReadmitted ~ Discharge + Admission + Race2 +
+                                  medical_Specialty_2 + Age_2 + Diagnosis + 
+                                  HbA1c + time_in_hospital + Age_2:medical_Specialty_2 +
+                                    Diagnosis:Discharge + Race2:Discharge + Discharge:time_in_hospital 
+                                + medical_Specialty_2:Discharge + time_in_hospital:medical_Specialty_2 +
+                                time_in_hospital:Diagnosis + HbA1c:Diagnosis
+                 , data = df_features, family = binomial)
+broom::tidy(logit_mod.wholeDf)
+```
+
+As the assignment was to create a "better" model, below is a LR with different features. I chose to eliminate all of the interactions and include the number of diagnosis, number of outpatient visits (to simulate IM/FM followup adherence which would hypothetically lead to better disease management), and if the patient is taking a DM medication.
+```{r}
+df_features_2 <- df_joined %>%
+  select(patient_nbr, WasReadmitted, Discharge, Admission, Race2, medical_Specialty_2, Age_2, Diagnosis, HbA1c, time_in_hospital, gender, number_diagnoses, number_outpatient, diabetesMed)
+feature_cols <- c('WasReadmitted', 'Discharge', 'Admission', 'Race2', 'medical_Specialty_2','Age_2', 'Diagnosis', 'HbA1c', 'gender', 'diabetesMed')
+df_features_2[,feature_cols] <- lapply(df_features_2[,feature_cols], as.factor)
+
+df_features_2$WasReadmitted <- relevel(df_features_2$WasReadmitted, ref = "No")
+df_features_2$Discharge <- relevel(df_features_2$Discharge, ref = "Home")
+df_features_2$Admission <- relevel(df_features_2$Admission, ref = "Emergency Room")
+df_features_2$Race2 <- relevel(df_features_2$Race2, ref = "African American")
+df_features_2$medical_Specialty_2 <- relevel(df_features_2$medical_Specialty_2, ref = "Cardiology")
+df_features_2$Age_2 <- relevel(df_features_2$Age_2, ref = "[30,60)")
+df_features_2$Diagnosis <- relevel(df_features_2$Diagnosis, ref = "Diabetes")
+df_features_2$HbA1c <- relevel(df_features_2$HbA1c, ref = "Not Measured")
+df_features_2$gender <- relevel(df_features_2$gender, ref = "Female")
+df_features_2$diabetesMed <- relevel(df_features_2$diabetesMed, ref = "No")
+
+set.seed(123)
+sample.patient_nbr <- sample(df_features_2$patient_nbr, 
+                      size = nrow(df_features)*.6, 
+                      replace = FALSE)
+length(sample.patient_nbr)/nrow(df_features_2)
+
+df_features_2.train <- df_features_2 %>%
+  filter(patient_nbr %in% sample.patient_nbr)
+glimpse(df_features_2.train)
+
+
+logit_mod_2.train <- glm(WasReadmitted ~ Discharge + Admission + Race2 +
+                                  medical_Specialty_2 + Age_2 + Diagnosis + 
+                                  HbA1c + time_in_hospital + number_outpatient 
+                                  + diabetesMed + number_diagnoses
+                         # + Age_2:medical_Specialty_2 +
+                         #            Diagnosis:Discharge + Race2:Discharge + Discharge:time_in_hospital 
+                         #        + medical_Specialty_2:Discharge + time_in_hospital:medical_Specialty_2 +
+                         #        time_in_hospital:Diagnosis + HbA1c:Diagnosis
+                 , data = df_features_2.train, family = binomial)
+broom::tidy(logit_mod_2.train)
+
+logit_2_model_errors <- logit_mod_2.train %>%
+  broom::glance() %>%
+  mutate(Model = "LR New Model") %>%
+  select (Model, AIC, BIC)
+
+logit_model_2_train_scored <- df_features_2.train
+
+logit_model_2_train_scored$probs <- predict(logit_mod_2.train,
+                                     logit_model_2_train_scored,
+                                     "response")
+
+
+## Run NEW GLM, binomial - Test
+df_features_2.test <- df_features_2 %>%
+  filter(!(patient_nbr %in% sample.patient_nbr))
+
+logit_2_test_score <- df_features_2.test %>%
+  mutate(model = "new_model")
+
+logit_2_test_score$probs <- predict(logit_mod_2.train,logit_2_test_score, "response")
+
+logit_mod_2.prob_sum <- logit_model_2_train_scored %>%
+  group_by(WasReadmitted) %>%
+  summarise(min_prob = min(probs),
+            mean_prob = mean(probs),
+            max_prob = max(probs))
+
+base_threshold_value_2 <- (logit_mod_2.prob_sum %>% filter(WasReadmitted == "Yes"))$mean_prob
+
+logit_2_test_score <- logit_2_test_score %>%
+  mutate(pred = if_else(probs > base_threshold_value_2, "Yes", "No")) %>%
+  mutate(pred_factor = as.factor(pred)) %>%
+  mutate(pred_factor = fct_relevel(pred_factor, c('No','Yes') )) %>%
+  mutate(correct_guess = if_else(pred_factor == WasReadmitted,TRUE,FALSE))
+
+
+
+```
+
+Compare model errors
+```{r}
+rbind(logit_model_errors,logit_2_model_errors)
+```
+Show new model confusion matrix
+```{r}
+logit_cm_2 <- confusionMatrix(logit_2_test_score$pred_factor, logit_2_test_score$WasReadmitted, positive = "Yes")
+draw_confusion_matrix(logit_cm_2, "NEW Logistic Regression Confusion Matrix")
+```
+
+
+
+In conclusion, with the addition of the 3 features in the new model, the accuracy increased slightly (65.9 vs 67.5) and the AIC is lower (24774 vs 24733). 
+
+
